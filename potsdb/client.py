@@ -18,7 +18,7 @@ _last_metrics = set()
 _valid_metric_chars = set(string.ascii_letters + string.digits + '-_./')
 
 
-def _mksocket(host, port, q, done, stop):
+def _mksocket(host, port, q, done, stop, backoff):
     """Returns a tcp socket to (host/port). Retries forever if connection fails"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
@@ -27,10 +27,11 @@ def _mksocket(host, port, q, done, stop):
             s.connect((host, port))
             return s
         except Exception as ex:
-            pass
+            if backoff:
+                time.sleep(backoff)
 
 
-def _push(host, port, q, done, mps, stop, test_mode):
+def _push(host, port, q, done, mps, stop, test_mode, backoff):
     """Worker thread. Connect to host/port, pull data from q until done is set"""
     sock = None
     retry_line = None
@@ -38,7 +39,7 @@ def _push(host, port, q, done, mps, stop, test_mode):
         stime = time.time()
 
         if sock == None and not test_mode:
-            sock = _mksocket(host, port, q, done, stop)
+            sock = _mksocket(host, port, q, done, stop, backoff)
             if sock == None:
                 break
 
@@ -76,7 +77,7 @@ def _push(host, port, q, done, mps, stop, test_mode):
 
 class Client():
     def __init__(self, host, port=4242, qsize=100000, host_tag=True,
-                 mps=MPS_LIMIT, check_host=True, test_mode=False):
+                 mps=MPS_LIMIT, check_host=True, test_mode=False, backoff=None):
         """Main tsdb client. Connect to host/port. Buffer up to qsize metrics"""
 
         self.q = queue.Queue(maxsize=qsize)
@@ -85,6 +86,7 @@ class Client():
         self.host = host
         self.port = int(port)
         self.queued = 0
+        self.backoff = backoff
 
         # Make initial check that the host is up, because once in the
         # background thread it will be silently ignored/retried
@@ -99,8 +101,10 @@ class Client():
         elif isinstance(host_tag, str):
             self.host_tag = host_tag
 
-        self.t = threading.Thread(target=_push,
-                                  args=(host, self.port, self.q, self.done, mps, self._stop, test_mode))
+        self.t = threading.Thread(
+            target=_push,
+            args=(host, self.port, self.q, self.done,
+                  mps, self._stop, test_mode, self.backoff))
         #self.t.daemon = daemon
         self.t.daemon = True
         self.t.start()
